@@ -27,16 +27,6 @@ def find_utxo_in_list(txin, txns) -> UnspentTxOut:
   except Exception as e:
     return None
 
-  return UnspentTxOut(*txout, txid=txid, is_coinbase=is_coinbase, height=-1, txout_idx=txout_idx)
-
-
-def utxo_from_block(block, txin):
-  tx = [t.txouts for t in block.txns if t.id == txin.outpoint.txid]
-  return tx[0][txin.outpoint.txout_idx] if tx else None
-
-
-def find_utxo(txin):
-  return utxo_set.get(txin.outpoint) or utxo_from_block(txin)
-
+  return UnspentTxOut(*txout, txid=txid, is_coinbase=False, height=-1, txout_idx=txout_idx)
 
 

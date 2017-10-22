@@ -1,14 +1,15 @@
 import binascii
 import time
+import ecdsa
 
 from mini_core.block import Block
 
 from mini_core.chain import ACTIVE_CHAIN_IDX, get_active_chain, get_current_height, with_lock, chain_lock, locate_block
 
-from mini_core.exceptions import BlockValidationError, TxnValidationError
+from mini_core.exceptions import BlockValidationError, TxnValidationError, TxUnlockError
 
 from mini_core.merkle_trees import get_merkle_root_of_txns
-
+from mini_core.mempool import find_utxo_in_mempool
 from mini_core.params import Params
 
 from mini_core.proof_of_work import get_next_work_required
@@ -24,7 +25,7 @@ from mini_core.wallet import pubkey_to_address
 from typing import Iterable
 
 
-def validate_txn(txn: Transaction, as_coinbase: bool = False, siblings_in_block: Iterable[Transaction] = None):
+def validate_txn(txn: Transaction, as_coinbase: bool = False, siblings_in_block: Iterable[Transaction] = None, allow_utxo_from_mempool: bool = True):
     """
     Validate a single transaction. Used in various contexts, so the parameters facilitate difficult users
     """
@@ -60,7 +61,7 @@ def validate_txn(txn: Transaction, as_coinbase: bool = False, siblings_in_block:
 
 
 def validate_signature_for_spend(txin, utxo: UnspentTxOut, txn):
-    pubkey_as_addr = pubkey_to_address(txin)
+    pubkey_as_addr = pubkey_to_address(txin.signature.unlock_pk)
     verifying_key = ecdsa.VerifyingKey.from_string(
         txin.signature.unlock_pk, curve=ecdsa.SECP256k1)
 
@@ -90,18 +91,22 @@ def build_spend_message(outpoint, pk, sequence, txouts) -> bytes:
 
 @with_lock(chain_lock)
 def validate_block(block: Block) -> Block:
+    # we can't have a block without transactions
     if not block.txns:
         raise BlockValidationError('txns empty')
 
     if block.timestamp - time.time() > Params.MAX_FUTURE_BLOCK_TIME:
         raise BlockValidationError('Block timestamp too far in the future')
 
+    # bad pow
     if int(block.id, 16) > (1 << (256 - block.bits)):
         raise BlockValidationError('Block header does not satify bits')
 
+    # first transaction must be the coinbase
     if [i for (i, tx) in enumerate(block.txns) if tx.is_coinbase] != [0]:
         raise BlockValidationError('First txn must be coinbase and no more')
 
+    # validate the basics of each transaction
     try:
         for i, txn in enumerate(block.txns):
             txn.validate_basics(as_coinbase=(i == 0))
@@ -109,7 +114,7 @@ def validate_block(block: Block) -> Block:
         logger.exception(f'Transaction {txn} in {block} failed to validate')
         raise BlockValidationError('Invalid txn {txn.id}')
 
-    print(f"{get_merkle_root_of_txns(block.txns).value}")
+    # bad merklehash value, transactions invalid
     if get_merkle_root_of_txns(block.txns).value != block.merkle_tree_hash:
         raise BlockValidationError('Merkle Hash invalid')
 
@@ -125,6 +130,10 @@ def validate_block(block: Block) -> Block:
 
         if not prev_block:
             raise BlockValidationError(f'prev block {block.prev_block_hash} not found in any chain', to_orphan=block)
+
+        # No more validation for a block getting attached to a branch
+        if prev_block_chain_idx != ACTIVE_CHAIN_IDX:
+            return block, prev_block_chain_idx
 
         # Previous block found in the active chain, but isn't tip => new fork.
         elif prev_block != get_active_chain()[-1]:

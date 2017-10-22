@@ -6,10 +6,11 @@ import random
 import socket
 import socketserver
 import threading
+import time
 
 import mini_core.block as block
 
-from mini_core.chain import get_active_chain, chain_lock, connect_block
+from mini_core.chain import get_active_chain, chain_lock, connect_block, locate_block
 
 from typing import Iterable, NamedTuple, Callable
 
@@ -25,6 +26,16 @@ peer_hostnames = {p for p in os.environ.get('TC_PEERS', '').split(',') if p}
 
 ibd_done = threading.Event()
 
+PORT = os.environ.get('TC_PORT', 8888)
+
+
+def get_ibd_done():
+    return ibd_done
+
+
+def get_peer_hostnames():
+    return peer_hostnames
+
 
 def int_to_8bytes(a: int) -> bytes:
     return binascii.unhexlify(f'{a:0{8}x}')
@@ -35,7 +46,7 @@ def encode_socket_data(data: object) -> bytes:
     Our protocol is: first 4 bytes signify msg length
     """
 
-    to_send = deserialize(data).encode()
+    to_send = serialize(data).encode()
     return int_to_8bytes(len(to_send)) + to_send
 
 
@@ -52,7 +63,7 @@ class GetBlocksMsg(NamedTuple):
     def handle(self, sock, peer_hostname):
         logger.debug(f'[p2p] recv getblocks from {peer_hostname}')
 
-        _, height, _ = block.locate_block(self.from_blockid, get_active_chain())
+        _, height, _ = locate_block(self.from_blockid, get_active_chain())
 
         height = height or 1
 
@@ -69,7 +80,7 @@ class InvMsg(NamedTuple):
     def handle(self, sock, peer_hostname):
         logger.info(f'[p2p] recv inv from {peer_hostname}')
 
-        new_blocks = [b for b in self.blocks if not block.locate_block(b.id)[0]]
+        new_blocks = [b for b in self.blocks if not locate_block(b.id)[0]]
 
         if not new_blocks:
             logger.info('[p2p] initial block download complete')
@@ -108,7 +119,7 @@ class GetActiveChainMsg(NamedTuple):
     """
 
     def handle(self, sock, peer_hostname):
-        sock.snedall(encode_socket_data(list(get_active_chain())))
+        sock.sendall(encode_socket_data(list(get_active_chain())))
 
 
 class AddPeerMsg(NamedTuple):
@@ -132,7 +143,7 @@ def read_all_from_socket(req) -> object:
         data += tdat
         msg_len -= len(tdat)
 
-    return serialize(data.decode()) if data else None
+    return deserialize(data.decode()) if data else None
 
 
 def send_to_peer(data, peer=None):
@@ -148,6 +159,7 @@ def send_to_peer(data, peer=None):
         try:
             with socket.create_connection((peer, PORT), timeout=1) as s:
                 s.sendall(encode_socket_data(data))
+                logger.info(f'sending this {data} to {peer} {PORT}')
         except Exception:
             logger.exception(f'failed to send to peer {peer}')
             tries_left -= 1
@@ -171,11 +183,10 @@ class TCPHandler(socketserver.BaseRequestHandler):
         peer_hostnames.add(peer_hostname)
 
         if hasattr(data, 'handle') and isinstance(data.handle, Callable):
-            logger.info(f'received msg {data} from peer {peer_hostname}')
             data.handle(self.request, peer_hostname)
         elif isinstance(data, Transaction):
             logger.info(f'received txn {data.id} for peer {peer_hostname}')
             mempool.add_txn_to_mempool(data)
-        elif isinstance(data, Block):
+        elif isinstance(data, block.Block):
             logger.info(f'received block {data.id} from peer {peer_hostname}')
             connect_block(data)

@@ -1,0 +1,13 @@
+version: "3"
+
+services:
+  node1:
+    build: .
+    image: cryptofromzero
+    ports:
+      - "8888:8888"
+
+  node2:
+    image: cryptofromzero
+    environment:
+      TC_PEERS: 'node1'

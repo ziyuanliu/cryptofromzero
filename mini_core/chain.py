@@ -1,5 +1,6 @@
 import logging
 import os
+import binascii
 
 from typing import Iterable, Union
 from threading import RLock
@@ -8,7 +9,7 @@ from mini_core.exceptions import BlockValidationError
 from mini_core.mempool import mempool
 from mini_core.transaction import Transaction, SignatureScript, TxIn, TxOut
 from mini_core.utils import deserialize
-from mini_core.utxo_set import add_to_utxo
+from mini_core.utxo_set import add_to_utxo, rm_from_utxo
 from functools import wraps
 
 
@@ -16,7 +17,7 @@ CHAIN_PATH = os.environ.get('TC_CHAIN_PATH', 'chain.dat')
 
 logger = logging.getLogger(__name__)
 
-generic_block_params = {
+genesis_block = Block(**{
     'version': 0,
     'prev_block_hash': None,
     'merkle_tree_hash': '688787d8ff144c502c7f5cffaafe2cc588d86079f9de88304c26b0cb99ce91c6',
@@ -27,16 +28,14 @@ generic_block_params = {
         Transaction(
             txins=[
                 TxIn(outpoint=None, signature=SignatureScript(
-                    unlock_sig='0', unlock_pk=None), sequence=0)
+                    unlock_sig=b'0', unlock_pk=None), sequence=0)
             ],
             txouts=[
                 TxOut(value=5000000, pubkey='143UVyz7ooiAv1pMqbwPPpnH4BV9ifJGFF')
             ]
         )
     ]
-}
-
-genesis_block = Block(**generic_block_params)
+})
 
 # highest proof of work
 active_chain: Iterable[Block] = [genesis_block]
@@ -60,8 +59,17 @@ def set_active_chain(val: Iterable[Block]):
     active_chain = val
 
 
+def set_side_branches(val: Iterable[Iterable[Block]]):
+    global side_branches
+    side_branches = val
+
+
 def get_active_chain() -> Iterable[Block]:
     return active_chain
+
+
+def get_side_branches() -> Iterable[Block]:
+    return side_branches
 
 
 def with_lock(lock):
@@ -90,7 +98,6 @@ def txn_iterator(chain):
 @with_lock(chain_lock)
 def locate_block(block_hash: str, chain=None) -> (Block, int, int):
     chains = [chain] if chain else [active_chain, *side_branches]
-
     for chain_idx, chain in enumerate(chains):
         for height, block in enumerate(chain):
             if block.id == block_hash:
@@ -124,7 +131,7 @@ def connect_block(block: Union[str, Block], doing_reorg=False) -> Union[None, Bl
     # a new side branch
     if chain_idx != ACTIVE_CHAIN_IDX and len(side_branches) < chain_idx:
         logger.info(
-            f'creating a new side branch (idx {chain_idx})'
+            f'creating a new side branch (idx {chain_idx}) '
             f'for block {block.id}')
         side_branches.append([])
 
@@ -148,13 +155,13 @@ def connect_block(block: Union[str, Block], doing_reorg=False) -> Union[None, Bl
         from mini_core.proof_of_work import mine_interrupt
         mine_interrupt.set()
         logger.info(
-            f'block accepted'
+            f'block accepted '
             f'height={len(active_chain) - 1} txns={len(block.txns)}'
         )
 
     import mini_core.networking as n
     for peer in n.peer_hostnames:
-        send_to_peer(block, peer)
+        n.send_to_peer(block, peer)
 
     return chain_idx
 
@@ -164,7 +171,7 @@ def disconnect_block(block, chain=None):
     chain = chain or active_chain
     assert block == chain[-1], "Block being disconnected must be tip."
 
-    for txn in blocks.txns:
+    for txn in block.txns:
         mempool[txn.id] = txn
 
         # Restore UTXO set to what it was before this block.
@@ -213,6 +220,8 @@ def reorg_if_necessary() -> bool:
 def try_reorg(branch, branch_idx, fork_idx) -> bool:
     global side_branches
 
+    fork_block = active_chain[fork_idx]
+
     def disconnect_to_fork():
         while active_chain[-1].id != fork_block.id:
             yield disconnect_block(active_chain[-1])
@@ -244,6 +253,7 @@ def try_reorg(branch, branch_idx, fork_idx) -> bool:
 
 @with_lock(chain_lock)
 def save_to_disk():
+    from mini_core.networking import encode_socket_data
     with open(CHAIN_PATH, 'wb') as f:
         logger.info(f'saving chain with {len(active_chain)} blocks')
         f.write(encode_socket_data(list(active_chain)))

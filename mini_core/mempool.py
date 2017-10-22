@@ -4,11 +4,13 @@ Mempool is the set of yet-unimed transactions.
 import logging
 
 from typing import Dict, Iterable
+from mini_core.exceptions import TxnValidationError
 from mini_core.transaction import Transaction, UnspentTxOut
 from mini_core.block import Block
 from mini_core.params import Params
 from mini_core.exceptions import BlockValidationError
 from mini_core.utils import serialize
+from mini_core.utxo_set import utxo_set
 
 
 logger = logging.getLogger(__name__)
@@ -50,7 +52,7 @@ def select_from_mempool(block: Block) -> Block:
         # For any txin that can't be found in the main chain, find its
         # transaction in the mempool (if it exists) and add it to the block.
         for txin in tx.txins:
-            if txin.to_spend in utxo_set:
+            if txin.outpoint in utxo_set:
                 continue
 
             in_mempool = find_utxo_in_mempool(txin)
@@ -64,7 +66,7 @@ def select_from_mempool(block: Block) -> Block:
                 logger.debug(f"Couldn't add parent")
                 return None
 
-        newblock = block._replace(txns=[*blocks.txns, tx])
+        newblock = block._replace(txns=[*block.txns, tx])
 
         if check_block_size(newblock):
             logger.debug(f'added tx {tx.id} to block')
@@ -73,34 +75,34 @@ def select_from_mempool(block: Block) -> Block:
         else:
             return block
 
-        for txid in mempool:
-            newblock = try_add_to_block(block, txid)
-
-            if check_block_size(newblock):
-                block = newblock
-            else:
-                break
-
-        return block
-
-    def add_txn_to_mempool(txn: Transaction):
-        if txn.id in mempool:
-            logger.info(f'txn {txn.id} already seen')
-            return
-
-        try:
-            txn = validate_txn(txn, siblings_in_block=block.txns[
-                               1:], allow_utxo_from_mempool=False)
-        except TxnValidationError as e:
-            if e.to_orphan:
-                logger.info(f"txn {e.to_orphan.id} submitted as orphan")
-                orphan_txns.append(e.to_orphan)
-            else:
-                logger.exception(f'txn rejected')
+    for txid in mempool:
+        newblock = try_add_to_block(block, txid)
+        if check_block_size(newblock):
+            block = newblock
         else:
-            logger.info(f"txn {txn.id} added to mempool")
-            mempool[txn.id] = txn
+            break
 
-            import mini_core.networking as n
-            for peer in n.peer_hostnames:
-                send_to_peer(txn, peer)
+    return block
+
+def add_txn_to_mempool(txn: Transaction):
+    global mempool
+    if txn.id in mempool:
+        logger.info(f'txn {txn.id} already seen')
+        return
+
+    try:
+        from mini_core.validation import validate_txn
+        txn = validate_txn(txn)
+    except TxnValidationError as e:
+        if e.to_orphan:
+            logger.info(f"txn {e.to_orphan.id} submitted as orphan")
+            orphaned_txns.append(e.to_orphan)
+        else:
+            logger.exception(f'txn rejected')
+    else:
+        logger.info(f"txn {txn.id} added to mempool")
+        mempool[txn.id] = txn
+
+        import mini_core.networking as n
+        for peer in n.peer_hostnames:
+            n.send_to_peer(txn, peer)

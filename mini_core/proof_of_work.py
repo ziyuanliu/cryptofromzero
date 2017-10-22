@@ -4,13 +4,17 @@ import threading
 
 from mini_core.block import Block
 
-from mini_core.chain import get_active_chain, chain_lock, locate_block, save_to_disk
+from mini_core.transaction import Transaction
+
+from mini_core.chain import connect_block, get_active_chain, chain_lock, locate_block, save_to_disk
 
 from mini_core.mempool import select_from_mempool
 
+from mini_core.merkle_trees import get_merkle_root_of_txns
+
 from mini_core.params import Params
 
-from mini_core.utxo_set import utxo_from_block, find_utxo
+from mini_core.utxo_set import utxo_set
 
 from mini_core.utils import serialize, sha256d
 
@@ -64,17 +68,17 @@ def assemble_and_solve_block(pay_coinbase_to_addr, txns=None):
         txns=txns or []
     )
 
-    if block.txns:
+    if not block.txns:
         block = select_from_mempool(block)
 
     fees = calculate_fees(block)
-    my_address = init_wallet()[2]
     coinbase_txn = Transaction.create_coinbase(
-        my_address,
+        pay_coinbase_to_addr,
         (get_block_subsidy() + fees), len(get_active_chain())
     )
 
     block = block._replace(txns=[coinbase_txn, *block.txns])
+
     block = block._replace(
         merkle_tree_hash=get_merkle_root_of_txns(block.txns).value)
 
@@ -92,8 +96,15 @@ def calculate_fees(block) -> int:
 
     fee = 0
 
+    def utxo_from_block(txin):
+        tx = [t.txouts for t in block.txns if t.id == txin.outpoint.txid]
+        return tx[0][txin.outpoint.txout_idx] if tx else None
+
+    def find_utxo(txin):
+        return utxo_set.get(txin.outpoint) or utxo_from_block(txin)
+
     for txn in block.txns:
-        spend = sum(find_utxo(i).value for i in txn.txins)
+        spent = sum(find_utxo(i).value for i in txn.txins)
         sent = sum(o.value for o in txn.txouts)
         fee += (spent - sent)
 
@@ -112,7 +123,8 @@ def get_block_subsidy() -> int:
 def mine(block):
     start = time.time()
 
-    nonce = 0
+    from random import randint
+    nonce = randint(0, 99999999999999)
 
     target = (1 << (256 - block.bits))
     mine_interrupt.clear()
@@ -133,7 +145,7 @@ def mine(block):
     return block
 
 
-def mine_forever(block):
+def mine_forever():
     while True:
         my_address = init_wallet()[2]
         block = assemble_and_solve_block(my_address)

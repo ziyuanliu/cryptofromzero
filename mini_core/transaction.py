@@ -54,7 +54,7 @@ class TxOut(NamedTuple):
 
 class UnspentTxOut(NamedTuple):
     """
-    Unspent output
+    Unspent output, UnspentTXOutput :)
     """
 
     value: int

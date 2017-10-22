@@ -57,7 +57,6 @@ def deserialize(serialized: str) -> object:
     """NamedTuple-flavored serialization from JSON."""
     import mini_core
     gs = vars(mini_core)
-    print(f'{gs.keys()}')
 
     def contents_to_objs(o):
         if isinstance(o, list):
